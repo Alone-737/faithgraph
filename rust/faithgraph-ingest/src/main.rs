@@ -1,18 +1,19 @@
 use anyhow::{Context, Result};
-use blake3::Hasher;
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
-use std::{
-    fs::File,
-    io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+use faithgraph_ingest::{
+    convert::{self, ConvertOptions},
+    entity_ids::stable_entity_id,
+    parser::{self, ParseOutcome},
 };
+use std::fs::File;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "faithgraph-ingest",
     version,
-    about = "Validate and inspect FaithGraph provenance events"
+    about = "Validate, inspect, and convert FaithGraph provenance events"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -21,28 +22,33 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect a JSONL provenance-event file.
     Inspect {
-        /// Input JSONL file.
         #[arg(short, long)]
         input: PathBuf,
 
-        /// Dataset namespace used for deterministic entity IDs.
         #[arg(long, default_value = "faithgraph-toy")]
         namespace: String,
     },
-}
 
-#[derive(Debug, Deserialize)]
-struct RawEvent {
-    event_id: String,
-    timestamp_ns: i64,
-    host: String,
-    event_type: String,
-    subject_type: String,
-    subject_id: String,
-    object_type: String,
-    object_id: String,
+    Convert {
+        #[arg(short, long)]
+        input: PathBuf,
+
+        #[arg(short, long)]
+        output: PathBuf,
+
+        #[arg(long, default_value = "faithgraph-toy")]
+        namespace: String,
+
+        #[arg(long, default_value = "unselected")]
+        dataset_name: String,
+
+        #[arg(long, default_value = "unverified")]
+        dataset_version: String,
+
+        #[arg(long)]
+        created_at_utc: Option<String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -54,50 +60,29 @@ struct InspectionSummary {
     maximum_timestamp_ns: Option<i64>,
 }
 
-fn stable_entity_id(namespace: &str, host: &str, entity_type: &str, external_id: &str) -> String {
-    let mut hasher = Hasher::new();
-
-    for component in [namespace, host, entity_type, external_id] {
-        hasher.update(&(component.len() as u64).to_le_bytes());
-        hasher.update(component.as_bytes());
-    }
-
-    hasher.finalize().to_hex().to_string()
-}
-
 fn inspect_file(path: &Path, namespace: &str) -> Result<InspectionSummary> {
     let file = File::open(path)
         .with_context(|| format!("failed to open input file {}", path.display()))?;
 
-    let reader = BufReader::new(file);
     let mut summary = InspectionSummary::default();
 
-    for (index, line_result) in reader.lines().enumerate() {
+    for parsed in parser::iter_events(BufReader::new(file)) {
         summary.total_lines += 1;
 
-        let line = match line_result {
-            Ok(value) => value,
-            Err(error) => {
+        let event = match parsed.outcome {
+            ParseOutcome::Event(event) => event,
+            ParseOutcome::Skipped(reason) => {
                 summary.invalid_events += 1;
-                eprintln!("line {}: failed to read: {error}", index + 1);
+                eprintln!("line {}: {reason}", parsed.line_number);
                 continue;
             }
         };
 
-        if line.trim().is_empty() {
+        if let Some(problem) = parser::validate(&event) {
             summary.invalid_events += 1;
-            eprintln!("line {}: empty record", index + 1);
+            eprintln!("line {}: {problem}", parsed.line_number);
             continue;
         }
-
-        let event: RawEvent = match serde_json::from_str(&line) {
-            Ok(value) => value,
-            Err(error) => {
-                summary.invalid_events += 1;
-                eprintln!("line {}: invalid JSON event: {error}", index + 1);
-                continue;
-            }
-        };
 
         summary.valid_events += 1;
 
@@ -108,7 +93,6 @@ fn inspect_file(path: &Path, namespace: &str) -> Result<InspectionSummary> {
                     current.min(event.timestamp_ns)
                 }),
         );
-
         summary.maximum_timestamp_ns = Some(
             summary
                 .maximum_timestamp_ns
@@ -123,7 +107,6 @@ fn inspect_file(path: &Path, namespace: &str) -> Result<InspectionSummary> {
             &event.subject_type,
             &event.subject_id,
         );
-
         let object_id =
             stable_entity_id(namespace, &event.host, &event.object_type, &event.object_id);
 
@@ -172,36 +155,42 @@ fn main() -> Result<()> {
                     .map_or_else(|| "none".to_string(), |value| value.to_string())
             );
         }
+
+        Command::Convert {
+            input,
+            output,
+            namespace,
+            dataset_name,
+            dataset_version,
+            created_at_utc,
+        } => {
+            let options = ConvertOptions {
+                namespace,
+                dataset_name,
+                dataset_version,
+                created_at_utc,
+            };
+
+            let result = convert::convert(&input, &output, &options)?;
+            let manifest = &result.manifest;
+
+            println!();
+            println!("Conversion summary");
+            println!("------------------");
+            println!("Nodes:              {}", manifest.node_count);
+            println!("Edges:              {}", manifest.edge_count);
+            println!("Processes:          {}", manifest.process_count);
+            println!("Invalid events:     {}", manifest.invalid_event_count);
+            println!("Duplicate events:   {}", manifest.duplicate_event_count);
+            println!(
+                "Timestamp range:    {} .. {}",
+                manifest.minimum_timestamp_ns, manifest.maximum_timestamp_ns
+            );
+            println!("Nodes written:      {}", result.nodes_path.display());
+            println!("Edges written:      {}", result.edges_path.display());
+            println!("Manifest written:   {}", result.manifest_path.display());
+        }
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::stable_entity_id;
-
-    #[test]
-    fn stable_id_is_deterministic() {
-        let first = stable_entity_id("toy", "host-a", "PROCESS", "p101");
-        let second = stable_entity_id("toy", "host-a", "PROCESS", "p101");
-
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn stable_id_changes_when_entity_changes() {
-        let first = stable_entity_id("toy", "host-a", "PROCESS", "p101");
-        let second = stable_entity_id("toy", "host-a", "PROCESS", "p102");
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn component_boundaries_do_not_collide() {
-        let first = stable_entity_id("toy", "ab", "c", "d");
-        let second = stable_entity_id("toy", "a", "bc", "d");
-
-        assert_ne!(first, second);
-    }
 }
