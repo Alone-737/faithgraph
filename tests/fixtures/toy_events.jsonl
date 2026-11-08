@@ -1,0 +1,5 @@
+{"event_id":"e1","timestamp_ns":1000000000,"host":"host-a","event_type":"SPAWNED","subject_type":"PROCESS","subject_id":"p100","object_type":"PROCESS","object_id":"p101"}
+{"event_id":"e2","timestamp_ns":1100000000,"host":"host-a","event_type":"READ","subject_type":"PROCESS","subject_id":"p101","object_type":"FILE","object_id":"/tmp/input"}
+{"event_id":"e3","timestamp_ns":1200000000,"host":"host-a","event_type":"WROTE","subject_type":"PROCESS","subject_id":"p101","object_type":"FILE","object_id":"/tmp/payload"}
+{"event_id":"e4","timestamp_ns":1300000000,"host":"host-a","event_type":"CONNECTED_TO","subject_type":"PROCESS","subject_id":"p101","object_type":"ENDPOINT","object_id":"203.0.113.10:4444"}
+{"event_id":"e5","timestamp_ns":1400000000,"host":"host-a","event_type":"READ","subject_type":"PROCESS","subject_id":"p102","object_type":"FILE","object_id":"/home/user/notes.txt"}

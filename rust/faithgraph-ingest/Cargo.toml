@@ -1,0 +1,18 @@
+[package]
+name = "faithgraph-ingest"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic provenance-event ingestion for FaithGraph"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
